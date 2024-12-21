@@ -1,10 +1,13 @@
 package captor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -163,17 +166,34 @@ func (ebpf *ebpfSetup) Capture(ctx context.Context, resultCh chan []uint32, erro
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	cmdStdoutCh := make(chan string)
-	cmdStderrCh := make(chan string)
+
 	// running command to trace its syscalls
-	go executor.Run(
-		ebpf.cmd,
-		ebpf.opts.CommandOutput,
-		ebpf.opts.CommandError,
-		&wg,
-		cmdStdoutCh,
-		cmdStderrCh,
-	)
+	go func() {
+		defer wg.Done()
+
+		cmdPrinter := func(shouldPrint bool, prefix string) func(r io.Reader) {
+			return func(r io.Reader) {
+				if !shouldPrint {
+					return
+				}
+				scanner := bufio.NewScanner(r)
+				for scanner.Scan() {
+					fmt.Printf("%v: %v\n", prefix, scanner.Text())
+				}
+				if err := scanner.Err(); err != nil {
+					fmt.Printf("error: %v\n", err)
+				}
+			}
+		}
+		if err := executor.Run(
+			ebpf.cmd,
+			cmdPrinter(ebpf.opts.CommandOutput, "stdout"),
+			cmdPrinter(ebpf.opts.CommandError, "stderr"),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return
+		}
+	}()
 
 	var syscalls []uint32
 	go func() {
@@ -201,18 +221,6 @@ func (ebpf *ebpfSetup) Capture(ctx context.Context, resultCh chan []uint32, erro
 				// will be left empty for now.
 				//fmt.Fprintf(os.Stderr, "lost %d data\n", lost)
 				return
-			case line, ok := <-cmdStdoutCh:
-				// managing stdout from executed command
-				if !ok {
-					break
-				}
-				fmt.Println("stdout:", line)
-			case err, ok := <-cmdStderrCh:
-				// managing stderr from executed command
-				if !ok {
-					break
-				}
-				fmt.Println("stderr:", err)
 			}
 		}
 	}()

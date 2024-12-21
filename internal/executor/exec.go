@@ -1,61 +1,52 @@
 package executor
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"sync"
 )
 
-// Run execute the command and wait for its end.
-// The cmdOutput argument is used to print the command output.
-func Run(cmd []string, cmdOutput, cmdError bool, wg *sync.WaitGroup, outputCh, errorCh chan<- string) {
-	defer func() {
-		wg.Done()
-	}()
-
+func Run(cmd []string, stdoutCB, stderrCB func(r io.Reader)) error {
 	command := exec.Command(cmd[0], cmd[1:]...)
-	stdout, _ := command.StdoutPipe()
-	stderr, _ := command.StderrPipe()
+
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err2 := command.StderrPipe()
+	if err2 != nil {
+		return err2
+	}
 
 	if err := command.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "command execution error: %v\n", err)
-		return
+		return err
 	}
 
-	var ioWg sync.WaitGroup
-	if cmdOutput {
-		ioWg.Add(1)
+	wg := &sync.WaitGroup{}
+	if stdoutCB != nil {
+		wg.Add(1)
 		go func() {
-			defer ioWg.Done()
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				outputCh <- scanner.Text()
-			}
-			if err := scanner.Err(); err != nil {
-				outputCh <- fmt.Sprintf("error: %v", err)
-			}
+			defer wg.Done()
+			stdoutCB(stdout)
 		}()
-	}
-	if cmdError {
-		ioWg.Add(1)
-		go func() {
-			defer ioWg.Done()
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				errorCh <- scanner.Text()
-			}
-			if err := scanner.Err(); err != nil {
-				errorCh <- fmt.Sprintf("error: %v", err)
-			}
-		}()
-	}
 
-	// wait for stdout/stderr scans to be completed
-	ioWg.Wait()
-	// wait for the executed command to be completed
-	command.Wait()
+	}
+	if stderrCB != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stderrCB(stderr)
+		}()
+	}
+	defer wg.Wait()
+
+	// Wait return error if the process has terminated with exit code > 0.
+	// In those cases we don't want to return an error
+	if err := command.Wait(); err != nil && command.ProcessState.ExitCode() == 0 {
+		return err
+	}
+	return nil
 }
 
 func Build(packagePath, outputFile string) (string, error) {
